@@ -1,5 +1,7 @@
+use std::fs::File;
 use std::path::PathBuf;
 
+use anyhow::{Context, Result};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -8,8 +10,12 @@ struct Args {
     file_name: PathBuf,
 }
 
-fn main() {
-    let args = Args::parse();
+fn main() -> Result<()> {
+    let args = Args::try_parse()?;
 
-    println!("{:?}", args);
+    let file_name = &args.file_name;
+    let _file = File::open(file_name)
+        .with_context(|| format!("Could not open {}", file_name.display()))?;
+
+    Ok(())
 }
