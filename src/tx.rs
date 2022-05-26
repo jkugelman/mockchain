@@ -68,13 +68,16 @@ impl Client {
     }
 
     fn credit(&mut self, amount: Decimal) -> anyhow::Result<()> {
-        assert!(amount.is_sign_positive());
+        assert!(amount >= dec!(0));
         self.available += amount;
         Ok(())
     }
 
     fn debit(&mut self, amount: Decimal) -> anyhow::Result<()> {
-        assert!(amount.is_sign_positive());
+        assert!(amount >= dec!(0));
+        if amount > self.available {
+            bail!("cannot withdraw {}, only {} available", amount, self.available);
+        }
         self.available -= amount;
         Ok(())
     }
@@ -108,10 +111,15 @@ pub fn process(records: Vec<Record>) -> anyhow::Result<BTreeMap<ClientId, Client
                 tx: tx_id,
                 amount,
             } => {
+                if amount < dec!(0) {
+                    eprintln!("ignoring negative deposit: {}", amount);
+                    continue;
+                }
+
                 let client = clients
                     .entry(client_id)
                     .or_insert_with(|| Client::new(client_id));
-                client.credit(amount)?;
+                let _ = client.credit(amount);
 
                 let tx = Tx::new(tx_id, amount);
                 if txs.insert(tx_id, tx).is_some() {
@@ -124,10 +132,15 @@ pub fn process(records: Vec<Record>) -> anyhow::Result<BTreeMap<ClientId, Client
                 tx: tx_id,
                 amount,
             } => {
+                if amount < dec!(0) {
+                    eprintln!("ignoring negative withdrawal: {}", amount);
+                    continue;
+                }
+
                 let client = clients
                     .entry(client_id)
                     .or_insert_with(|| Client::new(client_id));
-                client.debit(amount)?;
+                let _ = client.debit(amount);
 
                 let tx = Tx::new(tx_id, -amount);
                 if txs.insert(tx_id, tx).is_some() {
@@ -222,9 +235,35 @@ mod tests {
         let clients = process(records).unwrap();
         assert_eq!(clients.len(), 1);
         let client = clients.get(&1).unwrap();
-        assert_eq!(client.id, 1);
 
         assert_eq!(client.available, dec!(77));
+        assert_eq!(client.held, dec!(0));
+    }
+
+    #[test]
+    fn over_withdrawal_ignored() {
+        let records = vec![
+            Record::Deposit {
+                client: 1,
+                tx: 1,
+                amount: dec!(100),
+            },
+            Record::Withdrawal {
+                client: 1,
+                tx: 2,
+                amount: dec!(60),
+            },
+            Record::Withdrawal {
+                client: 1,
+                tx: 3,
+                amount: dec!(80),
+            },
+        ];
+        let clients = process(records).unwrap();
+        assert_eq!(clients.len(), 1);
+        let client = clients.get(&1).unwrap();
+
+        assert_eq!(client.available, dec!(40));
         assert_eq!(client.held, dec!(0));
     }
 }
