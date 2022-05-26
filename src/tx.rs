@@ -20,7 +20,7 @@ pub type TxId = u16;
 ///
 /// Integers could be used if we stored cents instead of dollars. That would be awkward in this
 /// program, though, since the specification requires 4 decimal places of precision rather than 2.
-/// That also wouldn't translate well to other currencies. Not every currency is divisible into
+/// It also wouldn't translate well to other currencies. Not every currency is divisible into
 /// hundredths.
 #[derive(Debug)]
 pub enum Record {
@@ -67,18 +67,25 @@ impl Client {
         }
     }
 
-    fn credit(&mut self, amount: Decimal) -> anyhow::Result<()> {
-        assert!(amount >= dec!(0));
+    /// Add `amount` to `self.available`. If `amount` is positive this is a credit; otherwise, it's
+    /// a debit. Fails if debiting more money than is available in the account.
+    fn add_available(&mut self, amount: Decimal) -> anyhow::Result<()> {
+        if self.available + amount < dec!(0) {
+            bail!(
+                "cannot withdraw {}, only {} available",
+                -amount,
+                self.available
+            );
+        }
         self.available += amount;
         Ok(())
     }
 
-    fn debit(&mut self, amount: Decimal) -> anyhow::Result<()> {
-        assert!(amount >= dec!(0));
-        if amount > self.available {
-            bail!("cannot withdraw {}, only {} available", amount, self.available);
-        }
-        self.available -= amount;
+    /// Add `amount` to `self.held` and subtract it from `self.available`. Fails if attempting to
+    /// hold more money than is available in the account.
+    fn add_held(&mut self, amount: Decimal) -> anyhow::Result<()> {
+        self.add_available(-amount)?;
+        self.held += amount;
         Ok(())
     }
 }
@@ -112,14 +119,16 @@ pub fn process(records: Vec<Record>) -> anyhow::Result<BTreeMap<ClientId, Client
                 amount,
             } => {
                 if amount < dec!(0) {
-                    eprintln!("ignoring negative deposit: {}", amount);
+                    eprintln!("(ignored) negative deposit: {}", amount);
                     continue;
                 }
 
                 let client = clients
                     .entry(client_id)
                     .or_insert_with(|| Client::new(client_id));
-                let _ = client.credit(amount);
+                client
+                    .add_available(amount)
+                    .expect("depositing cannot fail");
 
                 let tx = Tx::new(tx_id, amount);
                 if txs.insert(tx_id, tx).is_some() {
@@ -133,14 +142,20 @@ pub fn process(records: Vec<Record>) -> anyhow::Result<BTreeMap<ClientId, Client
                 amount,
             } => {
                 if amount < dec!(0) {
-                    eprintln!("ignoring negative withdrawal: {}", amount);
+                    eprintln!("(ignored) negative withdrawal: {}", amount);
                     continue;
                 }
 
                 let client = clients
                     .entry(client_id)
                     .or_insert_with(|| Client::new(client_id));
-                let _ = client.debit(amount);
+                if client.add_available(-amount).is_err() {
+                    eprintln!(
+                        "(ignored) cannot withdraw {} from client {}, only {} available",
+                        amount, client.id, client.available
+                    );
+                    continue;
+                }
 
                 let tx = Tx::new(tx_id, -amount);
                 if txs.insert(tx_id, tx).is_some() {
@@ -148,8 +163,60 @@ pub fn process(records: Vec<Record>) -> anyhow::Result<BTreeMap<ClientId, Client
                 }
             }
 
-            Record::Dispute { client, tx } => todo!(),
-            Record::Resolve { client, tx } => todo!(),
+            Record::Dispute {
+                client: client_id,
+                tx: tx_id,
+            } => {
+                let client = match clients.get_mut(&client_id) {
+                    Some(client) => client,
+                    None => {
+                        eprintln!("(ignored) bad dispute, no such client {}", client_id);
+                        continue;
+                    }
+                };
+                let tx = match txs.get(&tx_id) {
+                    Some(tx) => tx,
+                    None => {
+                        eprintln!("(ignored) bad dispute, no such transaction {}", tx_id);
+                        continue;
+                    }
+                };
+                if client.add_held(tx.amount).is_err() {
+                    eprintln!(
+                        "(ignored) bad dispute, cannot hold {}, only {} available",
+                        tx.amount, client.available
+                    );
+                    continue;
+                }
+            }
+
+            Record::Resolve {
+                client: client_id,
+                tx: tx_id,
+            } => {
+                let client = match clients.get_mut(&client_id) {
+                    Some(client) => client,
+                    None => {
+                        eprintln!("(ignored) bad resolve, no such client {}", client_id);
+                        continue;
+                    }
+                };
+                let tx = match txs.get(&tx_id) {
+                    Some(tx) => tx,
+                    None => {
+                        eprintln!("(ignored) bad resolve, no such transaction {}", tx_id);
+                        continue;
+                    }
+                };
+                if client.add_held(-tx.amount).is_err() {
+                    eprintln!(
+                        "(ignored) bad resolve, cannot release {}, only {} held",
+                        tx.amount, client.held
+                    );
+                    continue;
+                }
+            }
+
             Record::Chargeback { client, tx } => todo!(),
         }
     }
@@ -265,5 +332,54 @@ mod tests {
 
         assert_eq!(client.available, dec!(40));
         assert_eq!(client.held, dec!(0));
+    }
+
+    #[test]
+    fn dispute() {
+        let records = vec![
+            Record::Deposit {
+                client: 1,
+                tx: 1,
+                amount: dec!(100),
+            },
+            Record::Deposit {
+                client: 1,
+                tx: 2,
+                amount: dec!(50),
+            },
+            Record::Dispute { client: 1, tx: 1 },
+        ];
+        let clients = process(records).unwrap();
+        assert_eq!(clients.len(), 1);
+        let client = clients.get(&1).unwrap();
+
+        assert_eq!(client.available, dec!(50));
+        assert_eq!(client.held, dec!(100));
+        assert!(!client.locked);
+    }
+
+    #[test]
+    fn dispute_resolve() {
+        let records = vec![
+            Record::Deposit {
+                client: 1,
+                tx: 1,
+                amount: dec!(100),
+            },
+            Record::Deposit {
+                client: 1,
+                tx: 2,
+                amount: dec!(50),
+            },
+            Record::Dispute { client: 1, tx: 1 },
+            Record::Resolve { client: 1, tx: 1 },
+        ];
+        let clients = process(records).unwrap();
+        assert_eq!(clients.len(), 1);
+        let client = clients.get(&1).unwrap();
+
+        assert_eq!(client.available, dec!(150));
+        assert_eq!(client.held, dec!(0));
+        assert!(!client.locked);
     }
 }
