@@ -8,7 +8,7 @@ use rust_decimal_macros::dec;
 pub type ClientId = u16;
 
 /// Transaction ID.
-pub type TxId = u16;
+pub type TxId = u32;
 
 /// One entry from the transaction file.
 ///
