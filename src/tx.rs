@@ -58,7 +58,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(id: ClientId) -> Client {
+    pub fn new(id: ClientId) -> Self {
         Client {
             id,
             available: dec!(0),
@@ -102,7 +102,7 @@ pub struct Tx {
 }
 
 impl Tx {
-    pub fn new(id: TxId, amount: Decimal) -> Tx {
+    pub fn new(id: TxId, amount: Decimal) -> Self {
         Tx { id, amount }
     }
 }
