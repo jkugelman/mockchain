@@ -119,7 +119,22 @@ pub fn process(records: Vec<Record>) -> anyhow::Result<BTreeMap<ClientId, Client
                 }
             }
 
-            Record::Withdrawal { client, tx, amount } => todo!(),
+            Record::Withdrawal {
+                client: client_id,
+                tx: tx_id,
+                amount,
+            } => {
+                let client = clients
+                    .entry(client_id)
+                    .or_insert_with(|| Client::new(client_id));
+                client.debit(amount)?;
+
+                let tx = Tx::new(tx_id, -amount);
+                if txs.insert(tx_id, tx).is_some() {
+                    bail!("duplicate transaction id {}", tx_id);
+                }
+            }
+
             Record::Dispute { client, tx } => todo!(),
             Record::Resolve { client, tx } => todo!(),
             Record::Chargeback { client, tx } => todo!(),
@@ -155,10 +170,10 @@ mod tests {
             },
         ];
         let clients = process(records).unwrap();
-
         assert_eq!(clients.len(), 1);
         let client = clients.get(&1).unwrap();
         assert_eq!(client.id, 1);
+
         assert_eq!(client.available, dec!(123));
         assert_eq!(client.held, dec!(0));
     }
@@ -183,5 +198,33 @@ mod tests {
             },
         ];
         assert!(matches!(process(records), Err(_)));
+    }
+
+    #[test]
+    fn withdrawal() {
+        let records = vec![
+            Record::Deposit {
+                client: 1,
+                tx: 1,
+                amount: dec!(100),
+            },
+            Record::Withdrawal {
+                client: 1,
+                tx: 2,
+                amount: dec!(20),
+            },
+            Record::Withdrawal {
+                client: 1,
+                tx: 3,
+                amount: dec!(3),
+            },
+        ];
+        let clients = process(records).unwrap();
+        assert_eq!(clients.len(), 1);
+        let client = clients.get(&1).unwrap();
+        assert_eq!(client.id, 1);
+
+        assert_eq!(client.available, dec!(77));
+        assert_eq!(client.held, dec!(0));
     }
 }
