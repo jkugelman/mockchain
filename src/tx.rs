@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use anyhow::bail;
 use rust_decimal::Decimal;
@@ -124,9 +124,9 @@ impl Tx {
 /// This function purposefully takes a vector of owned `Record`s (`Vec<Record>`) rather than a
 /// borrowed slice (`&[Record]`) in order to "consume" the records. This prevents them from being
 /// reused after being processed.
-pub fn process(records: Vec<Record>) -> anyhow::Result<BTreeMap<ClientId, Client>> {
-    let mut clients = BTreeMap::new();
-    let mut txs = BTreeMap::new();
+pub fn process(records: Vec<Record>) -> anyhow::Result<HashMap<ClientId, Client>> {
+    let mut clients = HashMap::new();
+    let mut txs = HashMap::new();
 
     for record in records {
         match record {
