@@ -84,7 +84,13 @@ impl Client {
     /// Add `amount` to `self.held` and subtract it from `self.available`. Fails if attempting to
     /// hold more money than is available in the account.
     fn add_held(&mut self, amount: Decimal) -> anyhow::Result<()> {
-        self.add_available(-amount)?;
+        if self.available - amount < dec!(0) {
+            bail!("cannot hold {}, only {} available", amount, self.available);
+        }
+        if self.held + amount < dec!(0) {
+            bail!("cannot release {}, only {} held", -amount, self.held);
+        }
+        self.available -= amount;
         self.held += amount;
         Ok(())
     }
@@ -183,8 +189,8 @@ pub fn process(records: Vec<Record>) -> anyhow::Result<BTreeMap<ClientId, Client
                 };
                 if client.add_held(tx.amount).is_err() {
                     eprintln!(
-                        "(ignored) bad dispute, cannot hold {}, only {} available",
-                        tx.amount, client.available
+                        "(ignored) bad dispute, cannot hold {} from client {}, only {} available",
+                        tx.amount, client.id, client.available
                     );
                     continue;
                 }
@@ -210,8 +216,8 @@ pub fn process(records: Vec<Record>) -> anyhow::Result<BTreeMap<ClientId, Client
                 };
                 if client.add_held(-tx.amount).is_err() {
                     eprintln!(
-                        "(ignored) bad resolve, cannot release {}, only {} held",
-                        tx.amount, client.held
+                        "(ignored) bad resolve, cannot release {} from client {}, only {} held",
+                        tx.amount, client.id, client.held
                     );
                     continue;
                 }
