@@ -14,8 +14,7 @@ use crate::tx::{ClientId, Record, TxId};
 /// [1]: https://github.com/BurntSushi/rust-csv/issues/211
 #[derive(Deserialize, Debug)]
 struct RawRecord {
-    #[serde(rename = "type")]
-    record_type: RawRecordType,
+    r#type: RawRecordType,
     client: ClientId,
     tx: TxId,
     amount: Option<Decimal>,
@@ -35,7 +34,7 @@ impl TryFrom<RawRecord> for Record {
     type Error = anyhow::Error;
 
     fn try_from(raw: RawRecord) -> Result<Self, Self::Error> {
-        match raw.record_type {
+        match raw.r#type {
             RawRecordType::Deposit => Ok(Record::Deposit {
                 client: raw.client,
                 tx: raw.tx,
