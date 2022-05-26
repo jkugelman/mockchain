@@ -99,11 +99,7 @@ impl Client {
             bail!("cannot chargeback negative amount {}", amount);
         }
         if amount > self.held {
-            bail!(
-                "cannot chargeback {}, only {} held",
-                -amount,
-                self.held
-            );
+            bail!("cannot chargeback {}, only {} held", -amount, self.held);
         }
         self.held -= amount;
         self.locked = true;
@@ -378,6 +374,48 @@ mod tests {
 
         assert_eq!(client.available, dec!(40));
         assert_eq!(client.held, dec!(0));
+    }
+
+    #[test]
+    fn multiple_clients() {
+        let records = vec![
+            Record::Deposit {
+                client: 3,
+                tx: 30,
+                amount: dec!(300),
+            },
+            Record::Deposit {
+                client: 2,
+                tx: 20,
+                amount: dec!(200),
+            },
+            Record::Deposit {
+                client: 10,
+                tx: 1,
+                amount: dec!(100),
+            },
+            Record::Withdrawal {
+                client: 2,
+                tx: 21,
+                amount: dec!(20),
+            },
+            Record::Withdrawal {
+                client: 10,
+                tx: 2,
+                amount: dec!(10),
+            },
+            Record::Withdrawal {
+                client: 3,
+                tx: 3,
+                amount: dec!(30),
+            },
+        ];
+        let clients = process(records).unwrap();
+        assert_eq!(clients.len(), 3);
+
+        assert_eq!(clients.get(&10).unwrap().available, dec!(90));
+        assert_eq!(clients.get(&2).unwrap().available, dec!(180));
+        assert_eq!(clients.get(&3).unwrap().available, dec!(270));
     }
 
     #[test]
