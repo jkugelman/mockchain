@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{anyhow, Result, Context};
+use anyhow::{anyhow, Context};
 use csv::Trim;
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -77,7 +77,7 @@ impl TryFrom<RawRecord> for Record {
 /// The tradeoff is complexity. The iterator version was getting hairier than I liked, and I didn't
 /// want to blow my "complexity budget". Since this is just a take home test I decided not to go
 /// crazy and just return a `Result<Vec<_>>`, with the acknowledgement that it's a compromise.
-pub fn read_records(path: impl AsRef<Path>) -> Result<Vec<Record>> {
+pub fn read_records(path: impl AsRef<Path>) -> anyhow::Result<Vec<Record>> {
     let path = path.as_ref();
     let mut file = csv::ReaderBuilder::new()
         .trim(Trim::All)

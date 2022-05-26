@@ -12,4 +12,5 @@ anyhow = "1.0.57"
 clap = { version = "3.1.18", features = ["derive"] }
 csv = "1.1.6"
 rust_decimal = "1.23.1"
+rust_decimal_macros = "1.23.1"
 serde = { version = "1.0.137", features = ["derive"] }

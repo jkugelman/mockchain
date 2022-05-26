@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
 use clap::Parser;
 
 mod csv;
@@ -13,7 +12,7 @@ struct Args {
     file_name: PathBuf,
 }
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     let args = Args::try_parse()?;
 
     for record in csv::read_records(&args.file_name)? {
