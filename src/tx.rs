@@ -82,11 +82,8 @@ impl Client {
     }
 
     /// Add `amount` to `self.held` and subtract it from `self.available`. Fails if attempting to
-    /// hold more money than is available in the account.
+    /// release more money than is currently held.
     fn add_held(&mut self, amount: Decimal) -> anyhow::Result<()> {
-        if self.available - amount < dec!(0) {
-            bail!("cannot hold {}, only {} available", amount, self.available);
-        }
         if self.held + amount < dec!(0) {
             bail!("cannot release {}, only {} held", -amount, self.held);
         }
