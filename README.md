@@ -12,6 +12,15 @@
   bit by referencing test CSV files, or by using `include_bytes!` to embed test CSV data in the Rust
   code. I didn't do that, though, because the design spec says not to commit any CSV files.
 
+- The spec doesn't say what to do when an account is locked. It says the account should immediately
+  be "frozen" but doesn't specify what freezing entails. Should withdrawals be blocked? Should
+  deposits? In the absence of guidance I did not implement any restrictions on locked/frozen
+  accounts.
+
+  If I encountered this on the job, I would file a bug report against the spec. "Frozen" should
+  either be defined and spec'ed out; or, if it's synonymous with "locked", it should be changed to
+  "locked". Synonyms should be avoided in technical documents.
+
 ## Edge cases handled
 
 - Most errors are ignored as that seems to be the general philosophy of the design spec. The only

@@ -81,14 +81,32 @@ impl Client {
         Ok(())
     }
 
-    /// Add `amount` to `self.held` and subtract it from `self.available`. Fails if attempting to
-    /// release more money than is currently held.
+    /// Add `amount` to `self.held` and subtract it from `self.available`. If `amount` is negative,
+    /// held funds are released. Fails if attempting to release more money than is currently held.
     fn add_held(&mut self, amount: Decimal) -> anyhow::Result<()> {
         if self.held + amount < dec!(0) {
             bail!("cannot release {}, only {} held", -amount, self.held);
         }
         self.available -= amount;
         self.held += amount;
+        Ok(())
+    }
+
+    /// Withdraw `amount` from held funds and lock the account. Fails if there are insufficient held
+    /// funds.
+    fn chargeback(&mut self, amount: Decimal) -> anyhow::Result<()> {
+        if amount <= dec!(0) {
+            bail!("cannot chargeback negative amount {}", amount);
+        }
+        if amount > self.held {
+            bail!(
+                "cannot chargeback {}, only {} held",
+                -amount,
+                self.held
+            );
+        }
+        self.held -= amount;
+        self.locked = true;
         Ok(())
     }
 }
@@ -220,7 +238,32 @@ pub fn process(records: Vec<Record>) -> anyhow::Result<BTreeMap<ClientId, Client
                 }
             }
 
-            Record::Chargeback { client, tx } => todo!(),
+            Record::Chargeback {
+                client: client_id,
+                tx: tx_id,
+            } => {
+                let client = match clients.get_mut(&client_id) {
+                    Some(client) => client,
+                    None => {
+                        eprintln!("(ignored) bad chargeback, no such client {}", client_id);
+                        continue;
+                    }
+                };
+                let tx = match txs.get(&tx_id) {
+                    Some(tx) => tx,
+                    None => {
+                        eprintln!("(ignored) bad chargeback, no such transaction {}", tx_id);
+                        continue;
+                    }
+                };
+                if client.chargeback(tx.amount).is_err() {
+                    eprintln!(
+                        "(ignored) bad chargeback, cannot chargeback {} from client {}, only {} held",
+                        tx.amount, client.id, client.held
+                    );
+                    continue;
+                }
+            }
         }
     }
 
@@ -384,5 +427,30 @@ mod tests {
         assert_eq!(client.available, dec!(150));
         assert_eq!(client.held, dec!(0));
         assert!(!client.locked);
+    }
+
+    #[test]
+    fn chargeback() {
+        let records = vec![
+            Record::Deposit {
+                client: 1,
+                tx: 1,
+                amount: dec!(100),
+            },
+            Record::Deposit {
+                client: 1,
+                tx: 2,
+                amount: dec!(50),
+            },
+            Record::Dispute { client: 1, tx: 1 },
+            Record::Chargeback { client: 1, tx: 1 },
+        ];
+        let clients = process(records).unwrap();
+        assert_eq!(clients.len(), 1);
+        let client = clients.get(&1).unwrap();
+
+        assert_eq!(client.available, dec!(50));
+        assert_eq!(client.held, dec!(0));
+        assert!(client.locked);
     }
 }
