@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::bail;
+use anyhow::{anyhow, ensure, Context};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -10,46 +10,8 @@ pub type ClientId = u16;
 /// Transaction ID.
 pub type TxId = u32;
 
-/// One entry from the transaction file.
-///
-/// # Note
-///
-/// Currency values are stored as `Decimal`s. Floating point numbers are a bad idea for currency due
-/// the errors introduced by their base-2 representation. A float can store `0.50` exactly but not
-/// `0.20`, for example.
-///
-/// Integers could be used if we stored cents instead of dollars. That would be awkward in this
-/// program, though, since the specification requires 4 decimal places of precision rather than 2.
-/// It also wouldn't translate well to other currencies. Not every currency is divisible into
-/// hundredths.
-#[derive(Debug)]
-pub enum Record {
-    /// A deposit into a client's account.
-    Deposit {
-        client: ClientId,
-        tx: TxId,
-        amount: Decimal,
-    },
-
-    /// A withdrawal from a client's account.
-    Withdrawal {
-        client: ClientId,
-        tx: TxId,
-        amount: Decimal,
-    },
-
-    /// A dispute of a previous transaction. Funds are held until the dispute is resolved or charged
-    /// back.
-    Dispute { client: ClientId, tx: TxId },
-
-    /// Resolves a previous dispute, lifting the hold.
-    Resolve { client: ClientId, tx: TxId },
-
-    /// Resolves a previous dispute by withdrawing held funds and freezing the client's account.
-    Chargeback { client: ClientId, tx: TxId },
-}
-
 /// A client's funds and account status.
+#[derive(Debug)]
 pub struct Client {
     pub id: ClientId,
     pub available: Decimal,
@@ -67,46 +29,60 @@ impl Client {
         }
     }
 
-    /// Add `amount` to `self.available`. If `amount` is positive this is a credit; otherwise, it's
-    /// a debit. Fails if debiting more money than is available in the account.
-    fn add_available(&mut self, amount: Decimal) -> anyhow::Result<()> {
-        if self.available + amount < dec!(0) {
-            bail!(
-                "cannot withdraw {}, only {} available",
-                -amount,
-                self.available
-            );
-        }
+    pub fn deposit(&mut self, amount: Decimal) -> anyhow::Result<()> {
+        ensure!(amount >= dec!(0), "negative deposit: {}", amount);
         self.available += amount;
         Ok(())
     }
 
-    /// Add `amount` to `self.held` and subtract it from `self.available`. If `amount` is negative,
-    /// held funds are released. Fails if attempting to release more money than is currently held.
-    fn add_held(&mut self, amount: Decimal) -> anyhow::Result<()> {
-        if self.held + amount < dec!(0) {
-            bail!("cannot release {}, only {} held", -amount, self.held);
-        }
+    pub fn withdraw(&mut self, amount: Decimal) -> anyhow::Result<()> {
+        ensure!(amount >= dec!(0), "negative withdrawal: {}", amount);
+        ensure!(
+            amount <= self.available,
+            "cannot withdraw {}, only {} available",
+            amount,
+            self.available
+        );
+        self.available -= amount;
+        Ok(())
+    }
+
+    pub fn hold(&mut self, amount: Decimal) -> anyhow::Result<()> {
+        ensure!(amount >= dec!(0), "negative hold: {}", amount);
         self.available -= amount;
         self.held += amount;
         Ok(())
     }
 
-    /// Withdraw `amount` from held funds and lock the account. Fails if there are insufficient held
-    /// funds.
-    fn chargeback(&mut self, amount: Decimal) -> anyhow::Result<()> {
-        if amount <= dec!(0) {
-            bail!("cannot chargeback negative amount {}", amount);
-        }
-        if amount > self.held {
-            bail!("cannot chargeback {}, only {} held", -amount, self.held);
-        }
+    pub fn release(&mut self, amount: Decimal) -> anyhow::Result<()> {
+        ensure!(amount >= dec!(0), "negative release: {}", amount);
+        ensure!(
+            amount <= self.held,
+            "cannot release {}, only {} held",
+            amount,
+            self.held
+        );
+        self.available += amount;
+        self.held -= amount;
+        Ok(())
+    }
+
+    pub fn chargeback(&mut self, amount: Decimal) -> anyhow::Result<()> {
+        ensure!(amount >= dec!(0), "negative release: {}", amount);
+        ensure!(
+            amount <= self.held,
+            "cannot chargeback {}, only {} held",
+            amount,
+            self.held
+        );
         self.held -= amount;
         self.locked = true;
         Ok(())
     }
 }
 
+/// A deposit or withdrawal. A positive `amount` is a deposit, negative a withdrawal.
+#[derive(Debug)]
 pub struct Tx {
     pub id: TxId,
     pub amount: Decimal,
@@ -118,152 +94,95 @@ impl Tx {
     }
 }
 
-/// Process a series of transaction records and return the resultant list of clients, their
-/// balances, and their lock status.
-///
-/// This function purposefully takes a vector of owned `Record`s (`Vec<Record>`) rather than a
-/// borrowed slice (`&[Record]`) in order to "consume" the records. This prevents them from being
-/// reused after being processed.
-pub fn process(records: Vec<Record>) -> anyhow::Result<HashMap<ClientId, Client>> {
-    let mut clients = HashMap::new();
-    let mut txs = HashMap::new();
+pub struct Database {
+    pub clients: HashMap<ClientId, Client>,
+    pub txs: HashMap<TxId, Tx>,
+}
 
-    for record in records {
-        match record {
-            Record::Deposit {
-                client: client_id,
-                tx: tx_id,
-                amount,
-            } => {
-                if amount < dec!(0) {
-                    eprintln!("(ignored) negative deposit: {}", amount);
-                    continue;
-                }
-
-                let client = clients
-                    .entry(client_id)
-                    .or_insert_with(|| Client::new(client_id));
-                client
-                    .add_available(amount)
-                    .expect("depositing cannot fail");
-
-                let tx = Tx::new(tx_id, amount);
-                if txs.insert(tx_id, tx).is_some() {
-                    bail!("duplicate transaction id {}", tx_id);
-                }
-            }
-
-            Record::Withdrawal {
-                client: client_id,
-                tx: tx_id,
-                amount,
-            } => {
-                if amount < dec!(0) {
-                    eprintln!("(ignored) negative withdrawal: {}", amount);
-                    continue;
-                }
-
-                let client = clients
-                    .entry(client_id)
-                    .or_insert_with(|| Client::new(client_id));
-                if client.add_available(-amount).is_err() {
-                    eprintln!(
-                        "(ignored) cannot withdraw {} from client {}, only {} available",
-                        amount, client.id, client.available
-                    );
-                    continue;
-                }
-
-                let tx = Tx::new(tx_id, -amount);
-                if txs.insert(tx_id, tx).is_some() {
-                    bail!("duplicate transaction id {}", tx_id);
-                }
-            }
-
-            Record::Dispute {
-                client: client_id,
-                tx: tx_id,
-            } => {
-                let client = match clients.get_mut(&client_id) {
-                    Some(client) => client,
-                    None => {
-                        eprintln!("(ignored) bad dispute, no such client {}", client_id);
-                        continue;
-                    }
-                };
-                let tx = match txs.get(&tx_id) {
-                    Some(tx) => tx,
-                    None => {
-                        eprintln!("(ignored) bad dispute, no such transaction {}", tx_id);
-                        continue;
-                    }
-                };
-                if client.add_held(tx.amount).is_err() {
-                    eprintln!(
-                        "(ignored) bad dispute, cannot hold {} from client {}, only {} available",
-                        tx.amount, client.id, client.available
-                    );
-                    continue;
-                }
-            }
-
-            Record::Resolve {
-                client: client_id,
-                tx: tx_id,
-            } => {
-                let client = match clients.get_mut(&client_id) {
-                    Some(client) => client,
-                    None => {
-                        eprintln!("(ignored) bad resolve, no such client {}", client_id);
-                        continue;
-                    }
-                };
-                let tx = match txs.get(&tx_id) {
-                    Some(tx) => tx,
-                    None => {
-                        eprintln!("(ignored) bad resolve, no such transaction {}", tx_id);
-                        continue;
-                    }
-                };
-                if client.add_held(-tx.amount).is_err() {
-                    eprintln!(
-                        "(ignored) bad resolve, cannot release {} from client {}, only {} held",
-                        tx.amount, client.id, client.held
-                    );
-                    continue;
-                }
-            }
-
-            Record::Chargeback {
-                client: client_id,
-                tx: tx_id,
-            } => {
-                let client = match clients.get_mut(&client_id) {
-                    Some(client) => client,
-                    None => {
-                        eprintln!("(ignored) bad chargeback, no such client {}", client_id);
-                        continue;
-                    }
-                };
-                let tx = match txs.get(&tx_id) {
-                    Some(tx) => tx,
-                    None => {
-                        eprintln!("(ignored) bad chargeback, no such transaction {}", tx_id);
-                        continue;
-                    }
-                };
-                if client.chargeback(tx.amount).is_err() {
-                    eprintln!(
-                        "(ignored) bad chargeback, cannot chargeback {} from client {}, only {} held",
-                        tx.amount, client.id, client.held
-                    );
-                    continue;
-                }
-            }
+impl Database {
+    pub fn new() -> Self {
+        Self {
+            clients: HashMap::new(),
+            txs: HashMap::new(),
         }
     }
 
-    Ok(clients)
+    pub fn deposit(
+        &mut self,
+        client_id: ClientId,
+        tx_id: TxId,
+        amount: Decimal,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            !self.txs.contains_key(&tx_id),
+            "duplicate transaction id {}",
+            tx_id
+        );
+        let client = self.client(client_id);
+        client
+            .deposit(amount)
+            .with_context(|| format!("failed deposit with {:?}", client))?;
+        self.txs.insert(tx_id, Tx::new(tx_id, amount));
+        Ok(())
+    }
+
+    pub fn withdraw(
+        &mut self,
+        client_id: ClientId,
+        tx_id: TxId,
+        amount: Decimal,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            !self.txs.contains_key(&tx_id),
+            "duplicate transaction id {}",
+            tx_id
+        );
+        let client = self.client(client_id);
+        client
+            .withdraw(amount)
+            .with_context(|| format!("failed withdrawal with {:?}", client))?;
+        self.txs.insert(tx_id, Tx::new(tx_id, -amount));
+        Ok(())
+    }
+
+    pub fn dispute(&mut self, client_id: ClientId, tx_id: TxId) -> anyhow::Result<()> {
+        let (client, tx) = self.lookup(client_id, tx_id)?;
+        client
+            .hold(tx.amount)
+            .with_context(|| format!("failed dispute with {:?}", client))
+    }
+
+    pub fn resolve(&mut self, client_id: ClientId, tx_id: TxId) -> anyhow::Result<()> {
+        let (client, tx) = self.lookup(client_id, tx_id)?;
+        client
+            .release(tx.amount)
+            .with_context(|| format!("failed resolve with {:?}", client))
+    }
+
+    pub fn chargeback(&mut self, client_id: ClientId, tx_id: TxId) -> anyhow::Result<()> {
+        let (client, tx) = self.lookup(client_id, tx_id)?;
+        client
+            .chargeback(tx.amount)
+            .with_context(|| format!("failed chargeback with {:?}", client))
+    }
+
+    /// Look up an existing client, or create a new one.
+    fn client(&mut self, id: ClientId) -> &mut Client {
+        self.clients.entry(id).or_insert_with(|| Client::new(id))
+    }
+
+    /// We need to lookup the client and tx at the same time in order to split the borrow of `&mut
+    /// self` into borrows of two sub-fields.
+    fn lookup(&mut self, client_id: ClientId, tx_id: TxId) -> anyhow::Result<(&mut Client, &Tx)> {
+        Ok((
+            self.clients
+                .get_mut(&client_id)
+                .ok_or_else(|| anyhow!("no such client {}", client_id))?,
+            self.txs
+                .get(&tx_id)
+                .ok_or_else(|| anyhow!("no such tx {}", tx_id))?,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -273,222 +192,87 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deposit() {
-        let records = vec![
-            Record::Deposit {
-                client: 1,
-                tx: 1,
-                amount: dec!(100),
-            },
-            Record::Deposit {
-                client: 1,
-                tx: 2,
-                amount: dec!(20),
-            },
-            Record::Deposit {
-                client: 1,
-                tx: 3,
-                amount: dec!(3),
-            },
-        ];
-        let clients = process(records).unwrap();
-        assert_eq!(clients.len(), 1);
-        let client = clients.get(&1).unwrap();
-        assert_eq!(client.id, 1);
+    fn deposit_withdraw() {
+        let mut db = Database::new();
 
-        assert_eq!(client.available, dec!(123));
-        assert_eq!(client.held, dec!(0));
+        db.deposit(1, 1, dec!(100)).unwrap();
+        assert_funds(&db, 1, dec!(100), dec!(0));
+
+        db.deposit(1, 2, dec!(20)).unwrap();
+        assert_funds(&db, 1, dec!(120), dec!(0));
+
+        db.deposit(1, 3, dec!(3)).unwrap();
+        assert_funds(&db, 1, dec!(123), dec!(0));
+
+        db.withdraw(1, 4, dec!(100)).unwrap();
+        assert_funds(&db, 1, dec!(23), dec!(0));
+
+        db.withdraw(1, 5, dec!(20)).unwrap();
+        assert_funds(&db, 1, dec!(3), dec!(0));
+
+        assert!(db.withdraw(1, 6, dec!(444)).is_err());
+        assert_funds(&db, 1, dec!(3), dec!(0));
     }
 
     #[test]
     fn duplicate_tx_ids() {
-        let records = vec![
-            Record::Deposit {
-                client: 1,
-                tx: 1,
-                amount: dec!(100),
-            },
-            Record::Deposit {
-                client: 1,
-                tx: 1,
-                amount: dec!(20),
-            },
-            Record::Deposit {
-                client: 1,
-                tx: 1,
-                amount: dec!(3),
-            },
-        ];
-        assert!(matches!(process(records), Err(_)));
-    }
+        let mut db = Database::new();
 
-    #[test]
-    fn withdrawal() {
-        let records = vec![
-            Record::Deposit {
-                client: 1,
-                tx: 1,
-                amount: dec!(100),
-            },
-            Record::Withdrawal {
-                client: 1,
-                tx: 2,
-                amount: dec!(20),
-            },
-            Record::Withdrawal {
-                client: 1,
-                tx: 3,
-                amount: dec!(3),
-            },
-        ];
-        let clients = process(records).unwrap();
-        assert_eq!(clients.len(), 1);
-        let client = clients.get(&1).unwrap();
-
-        assert_eq!(client.available, dec!(77));
-        assert_eq!(client.held, dec!(0));
-    }
-
-    #[test]
-    fn over_withdrawal_ignored() {
-        let records = vec![
-            Record::Deposit {
-                client: 1,
-                tx: 1,
-                amount: dec!(100),
-            },
-            Record::Withdrawal {
-                client: 1,
-                tx: 2,
-                amount: dec!(60),
-            },
-            Record::Withdrawal {
-                client: 1,
-                tx: 3,
-                amount: dec!(80),
-            },
-        ];
-        let clients = process(records).unwrap();
-        assert_eq!(clients.len(), 1);
-        let client = clients.get(&1).unwrap();
-
-        assert_eq!(client.available, dec!(40));
-        assert_eq!(client.held, dec!(0));
+        db.deposit(1, 1, dec!(100)).unwrap();
+        assert!(db.deposit(2, 1, dec!(20)).is_err());
     }
 
     #[test]
     fn multiple_clients() {
-        let records = vec![
-            Record::Deposit {
-                client: 3,
-                tx: 30,
-                amount: dec!(300),
-            },
-            Record::Deposit {
-                client: 2,
-                tx: 20,
-                amount: dec!(200),
-            },
-            Record::Deposit {
-                client: 10,
-                tx: 1,
-                amount: dec!(100),
-            },
-            Record::Withdrawal {
-                client: 2,
-                tx: 21,
-                amount: dec!(20),
-            },
-            Record::Withdrawal {
-                client: 10,
-                tx: 2,
-                amount: dec!(10),
-            },
-            Record::Withdrawal {
-                client: 3,
-                tx: 3,
-                amount: dec!(30),
-            },
-        ];
-        let clients = process(records).unwrap();
-        assert_eq!(clients.len(), 3);
+        let mut db = Database::new();
 
-        assert_eq!(clients.get(&10).unwrap().available, dec!(90));
-        assert_eq!(clients.get(&2).unwrap().available, dec!(180));
-        assert_eq!(clients.get(&3).unwrap().available, dec!(270));
+        db.deposit(3, 30, dec!(300)).unwrap();
+        db.deposit(2, 20, dec!(200)).unwrap();
+        db.deposit(10, 1, dec!(100)).unwrap();
+        db.withdraw(2, 21, dec!(20)).unwrap();
+        db.withdraw(10, 2, dec!(10)).unwrap();
+        db.withdraw(3, 3, dec!(30)).unwrap();
+
+        assert_funds(&db, 10, dec!(90), dec!(0));
+        assert_funds(&db, 2, dec!(180), dec!(0));
+        assert_funds(&db, 3, dec!(270), dec!(0));
     }
 
     #[test]
-    fn dispute() {
-        let records = vec![
-            Record::Deposit {
-                client: 1,
-                tx: 1,
-                amount: dec!(100),
-            },
-            Record::Deposit {
-                client: 1,
-                tx: 2,
-                amount: dec!(50),
-            },
-            Record::Dispute { client: 1, tx: 1 },
-        ];
-        let clients = process(records).unwrap();
-        assert_eq!(clients.len(), 1);
-        let client = clients.get(&1).unwrap();
+    fn dispute_resolve_chargeback() {
+        let mut db = Database::new();
 
-        assert_eq!(client.available, dec!(50));
-        assert_eq!(client.held, dec!(100));
-        assert!(!client.locked);
+        db.deposit(1, 1, dec!(100)).unwrap();
+        db.deposit(1, 2, dec!(50)).unwrap();
+
+        db.dispute(1, 1).unwrap();
+        assert_funds_locked(&db, 1, dec!(50), dec!(100), false);
+
+        db.resolve(1, 1).unwrap();
+        assert_funds_locked(&db, 1, dec!(150), dec!(0), false);
+
+        db.dispute(1, 1).unwrap();
+        assert_funds_locked(&db, 1, dec!(50), dec!(100), false);
+
+        db.chargeback(1, 1).unwrap();
+        assert_funds_locked(&db, 1, dec!(50), dec!(0), true);
     }
 
-    #[test]
-    fn dispute_resolve() {
-        let records = vec![
-            Record::Deposit {
-                client: 1,
-                tx: 1,
-                amount: dec!(100),
-            },
-            Record::Deposit {
-                client: 1,
-                tx: 2,
-                amount: dec!(50),
-            },
-            Record::Dispute { client: 1, tx: 1 },
-            Record::Resolve { client: 1, tx: 1 },
-        ];
-        let clients = process(records).unwrap();
-        assert_eq!(clients.len(), 1);
-        let client = clients.get(&1).unwrap();
-
-        assert_eq!(client.available, dec!(150));
-        assert_eq!(client.held, dec!(0));
-        assert!(!client.locked);
+    fn assert_funds(db: &Database, client_id: ClientId, available: Decimal, held: Decimal) {
+        let client = db.clients.get(&client_id).unwrap();
+        assert_eq!(client.available, available);
+        assert_eq!(client.held, held);
     }
 
-    #[test]
-    fn chargeback() {
-        let records = vec![
-            Record::Deposit {
-                client: 1,
-                tx: 1,
-                amount: dec!(100),
-            },
-            Record::Deposit {
-                client: 1,
-                tx: 2,
-                amount: dec!(50),
-            },
-            Record::Dispute { client: 1, tx: 1 },
-            Record::Chargeback { client: 1, tx: 1 },
-        ];
-        let clients = process(records).unwrap();
-        assert_eq!(clients.len(), 1);
-        let client = clients.get(&1).unwrap();
-
-        assert_eq!(client.available, dec!(50));
-        assert_eq!(client.held, dec!(0));
-        assert!(client.locked);
+    fn assert_funds_locked(
+        db: &Database,
+        client_id: ClientId,
+        available: Decimal,
+        held: Decimal,
+        locked: bool,
+    ) {
+        assert_funds(db, client_id, available, held);
+        let client = db.clients.get(&client_id).unwrap();
+        assert_eq!(client.locked, locked);
     }
 }
