@@ -86,11 +86,16 @@ impl Client {
 pub struct Tx {
     pub id: TxId,
     pub amount: Decimal,
+    pub disputed: bool,
 }
 
 impl Tx {
     pub fn new(id: TxId, amount: Decimal) -> Self {
-        Tx { id, amount }
+        Tx {
+            id,
+            amount,
+            disputed: false,
+        }
     }
 }
 
@@ -148,25 +153,35 @@ impl Database {
     pub fn dispute(&mut self, client_id: ClientId, tx_id: TxId) -> anyhow::Result<()> {
         let (client, tx) = self.lookup(client_id, tx_id)?;
         ensure!(tx.amount >= dec!(0), "cannot dispute a withdrawal");
-        client
-            .hold(tx.amount)
-            .with_context(|| format!("failed dispute with {:?}", client))
+        if !tx.disputed {
+            client
+                .hold(tx.amount)
+                .with_context(|| format!("failed dispute with {:?}", client))?;
+            tx.disputed = true;
+        }
+        Ok(())
     }
 
     pub fn resolve(&mut self, client_id: ClientId, tx_id: TxId) -> anyhow::Result<()> {
         let (client, tx) = self.lookup(client_id, tx_id)?;
         ensure!(tx.amount >= dec!(0), "cannot resolve a withdrawal");
+        ensure!(tx.disputed, "cannot resolved undisputed transaction");
         client
             .release(tx.amount)
-            .with_context(|| format!("failed resolve with {:?}", client))
+            .with_context(|| format!("failed resolve with {:?}", client))?;
+        tx.disputed = false;
+        Ok(())
     }
 
     pub fn chargeback(&mut self, client_id: ClientId, tx_id: TxId) -> anyhow::Result<()> {
         let (client, tx) = self.lookup(client_id, tx_id)?;
         ensure!(tx.amount >= dec!(0), "cannot chargeback a withdrawal");
+        ensure!(tx.disputed, "cannot chargeback undisputed transaction");
         client
             .chargeback(tx.amount)
-            .with_context(|| format!("failed chargeback with {:?}", client))
+            .with_context(|| format!("failed chargeback with {:?}", client))?;
+        tx.disputed = false;
+        Ok(())
     }
 
     /// Look up an existing client, or create a new one.
@@ -176,13 +191,17 @@ impl Database {
 
     /// We need to lookup the client and tx at the same time in order to split the borrow of `&mut
     /// self` into borrows of two sub-fields.
-    fn lookup(&mut self, client_id: ClientId, tx_id: TxId) -> anyhow::Result<(&mut Client, &Tx)> {
+    fn lookup(
+        &mut self,
+        client_id: ClientId,
+        tx_id: TxId,
+    ) -> anyhow::Result<(&mut Client, &mut Tx)> {
         Ok((
             self.clients
                 .get_mut(&client_id)
                 .ok_or_else(|| anyhow!("no such client {}", client_id))?,
             self.txs
-                .get(&tx_id)
+                .get_mut(&tx_id)
                 .ok_or_else(|| anyhow!("no such tx {}", tx_id))?,
         ))
     }
@@ -256,6 +275,14 @@ mod tests {
 
         db.dispute(1, 1).unwrap();
         assert_funds_locked(&db, 1, dec!(50), dec!(100), false);
+
+        // Ignore double disputes.
+        db.dispute(1, 1).unwrap();
+        assert_funds_locked(&db, 1, dec!(50), dec!(100), false);
+
+        // Ignore when undisputed.
+        assert!(db.resolve(1, 2).is_err());
+        assert!(db.chargeback(1, 2).is_err());
 
         db.chargeback(1, 1).unwrap();
         assert_funds_locked(&db, 1, dec!(50), dec!(0), true);
