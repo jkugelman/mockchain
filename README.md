@@ -6,16 +6,23 @@
   precision no problem.
 
 - CSV records are streamed via a custom `Iterator` so as to avoid O(n) memory usage, and to allow
-  for files to be read while still being written to.
+  for files to be read while still being written to. The reader and writer accept generic `Read` and
+  `Write` objects so as to provide maximum flexibility.
 
 - There's a large suite of unit tests. Left to my own devices I would have written integration tests
-  with that use test CSV files, or that use `include_bytes!` to embed test CSV data in the Rust
-  code. I didn't do that, though, because the design spec says not to commit any CSV files.
+  that use real CSV files, or that use `include_bytes!` to embed test CSV data in the Rust code. I
+  didn't do that, though, because the design spec warns against committing any CSV files derived
+  from the spec. I'm not exactly sure what that's about so to be cautious I haven't committed any
+  CSV files at all. All my test data is embedded as Rust code.
 
 - Clients and transactions are stored in `HashMap`s. I originally used `BTreeMap`s so the records
   would be sorted by ids, leading to nicer output. The spec makes a point to specify that order
   doesn't matter, though, so I switched to `HashMap`s for those sweet O(log n) -> O(1) lookup and
   insertion efficiency gains. (They're not actually *huge* gains, but they're something.)
+
+- The spec shows dispute/resolve/chargeback records in tabular form, which makes it unclear if these
+  rows have an empty `amount` column or if the column is absent entirely. In other words, will those
+  rows have trailing commas? My interpretation is yes, they will.
 
 ## Edge cases handled
 
