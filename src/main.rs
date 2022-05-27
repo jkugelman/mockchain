@@ -1,13 +1,13 @@
+mod csv;
+mod db;
+
 use std::fs::File;
 use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
 
-use crate::tx::Database;
-
-mod csv;
-mod tx;
+use crate::db::Database;
 
 /// Command-line arguments.
 #[derive(Parser, Debug)]

@@ -5,7 +5,7 @@ use csv::Trim;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-use crate::tx::{ClientId, TxId, Database};
+use crate::db::{ClientId, TxId, Database};
 
 /// Parses the named CSV file and returns an iterator that streams one `Record` per row.
 ///
