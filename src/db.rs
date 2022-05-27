@@ -68,7 +68,7 @@ impl Client {
     }
 
     pub fn chargeback(&mut self, amount: Decimal) -> anyhow::Result<()> {
-        ensure!(amount >= dec!(0), "negative release: {}", amount);
+        ensure!(amount >= dec!(0), "negative chargeback: {}", amount);
         ensure!(
             amount <= self.held,
             "cannot chargeback {}, only {} held",
@@ -147,6 +147,7 @@ impl Database {
 
     pub fn dispute(&mut self, client_id: ClientId, tx_id: TxId) -> anyhow::Result<()> {
         let (client, tx) = self.lookup(client_id, tx_id)?;
+        ensure!(tx.amount >= dec!(0), "cannot dispute a withdrawal");
         client
             .hold(tx.amount)
             .with_context(|| format!("failed dispute with {:?}", client))
@@ -154,6 +155,7 @@ impl Database {
 
     pub fn resolve(&mut self, client_id: ClientId, tx_id: TxId) -> anyhow::Result<()> {
         let (client, tx) = self.lookup(client_id, tx_id)?;
+        ensure!(tx.amount >= dec!(0), "cannot resolve a withdrawal");
         client
             .release(tx.amount)
             .with_context(|| format!("failed resolve with {:?}", client))
@@ -161,6 +163,7 @@ impl Database {
 
     pub fn chargeback(&mut self, client_id: ClientId, tx_id: TxId) -> anyhow::Result<()> {
         let (client, tx) = self.lookup(client_id, tx_id)?;
+        ensure!(tx.amount >= dec!(0), "cannot chargeback a withdrawal");
         client
             .chargeback(tx.amount)
             .with_context(|| format!("failed chargeback with {:?}", client))
@@ -256,6 +259,20 @@ mod tests {
 
         db.chargeback(1, 1).unwrap();
         assert_funds_locked(&db, 1, dec!(50), dec!(0), true);
+    }
+
+    #[test]
+    fn cannot_dispute_withdrawals() {
+        let mut db = Database::new();
+
+        db.deposit(1, 1, dec!(100)).unwrap();
+        db.withdraw(1, 2, dec!(60)).unwrap();
+
+        assert!(db.dispute(1, 2).is_err());
+        assert!(db.resolve(1, 2).is_err());
+        assert!(db.chargeback(1, 2).is_err());
+
+        assert_funds_locked(&db, 1, dec!(40), dec!(0), false);
     }
 
     fn assert_funds(db: &Database, client_id: ClientId, available: Decimal, held: Decimal) {

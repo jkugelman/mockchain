@@ -34,6 +34,9 @@
   you deposit $100, withdraw $100, and then the deposit is disputed, your available funds to go
   -$100.
 
+- The spec doesn't explicitly say what types of transactions can be disputed. Deposits can obviously
+  be disputed. Can withdrawals? I'm not sure that's sensible, so I ignore disputed withdrawals.
+
 - Ignores resolves when there are insufficient held funds. Held funds cannot go negative.
 
   (This can only happen if a disputed transaction is resolved more than once, or if an undisputed
